@@ -610,8 +610,9 @@ actual class CameraController(
                 override fun onImageSaved(output: ImageCapture.OutputFileResults) {
                     pendingCaptures.decrementAndGet()
 
-                    // Notify MediaStore so image appears in Gallery
-                    notifyMediaStore(outputFile)
+                    // App-private captures are handed to the host; scanning them leaves stale
+                    // gallery entries when the host moves the file into temporary storage.
+                    if (directory != Directory.DOCUMENTS) notifyMediaStore(outputFile)
 
                     // Notify capture listeners (e.g. ImageSaverPlugin auto-save) off the main
                     // thread, reading the just-saved file only when someone is listening.

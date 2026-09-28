@@ -27,6 +27,9 @@ A modern camera library for Compose Multiplatform supporting Android, iOS, and D
 - Android/iOS native controls and explicit unsupported capability reporting.
 
 See [Pro camera API and device verification](docs/pro-camera.md) for usage and limitations.
+Faayaverse consumes the core and analyzer through a local composite build. The
+prepared `io.faaya.kamera` coordinates are unpublished; use the fork checkout.
+The fork's toolchain matches Faayaverse (Gradle 9, Kotlin 2.4, Compose 1.11.1).
 
 - **Cross-Platform**: Android, iOS, and JVM Desktop
 - **Compose-First**: Native Compose Multiplatform API

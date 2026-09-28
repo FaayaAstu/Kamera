@@ -3,7 +3,8 @@
 This fork is based on upstream Kamera 1.2 plus upstream's fix for the
 `kotlinx-coroutines-test` runtime dependency leak. Pro camera APIs and motion
 tracking live in `cameraK`, including Android, iOS and desktop implementations.
-The Faayaverse app has not been changed to consume this fork yet.
+Faayaverse consumes the fork through a local composite build and supplies the
+photo controls and live tilt UI. Native sensor processing remains in this library.
 
 ## Manual controls
 
@@ -117,7 +118,7 @@ samples and stopped-sensor metadata. Native controls still require real-device Q
 6. Verify portrait, landscape and flat motion signs; calibrate and pause/resume.
 7. Capture with tracking disabled/enabled and check snapshot presence and age.
 
-### Local validation (2026-09-28)
+### Initial standalone validation (2026-09-28)
 
 Checked in the primary `Faaya/Kamera` checkout on `faaya/feature/pro-camera`:
 
@@ -134,9 +135,20 @@ physical-device run, photo metadata comparison or sensor accuracy measurement
 has been performed yet. Compile/test success does not replace the device checks
 listed above.
 
-The fork is unpublished. Choose Faaya-owned artifact coordinates/version before
-publishing or integrating it into Faayaverse; upstream publishing coordinates have
-not been used to release these changes.
+### Faayaverse toolchain alignment
+
+For app integration, the fork now uses Gradle 9.0.0, Kotlin 2.4.0, Compose 1.11.1
+and coroutines 1.11.0. iOS targets are ARM64 device and ARM64 simulator; Compose
+1.11.1 does not resolve Intel simulator artifacts. JVM lambda classes match the
+host app's D8 policy. Android DOCUMENTS captures skip MediaStore scanning because
+the app owns and moves these private files.
+
+Prepared unpublished coordinates are `io.faaya.kamera:camerak:1.2.0-faaya.1` and
+`io.faaya.kamera:analyzer_plugin:1.2.0-faaya.1`. Faayaverse substitutes both with
+projects from this checkout and pins the fork revision in CI. No Maven release
+has been published. The initial standalone checks above predate this alignment;
+app build results and physical-device checks are recorded in Faayaverse's
+`docs/pro-camera-integration.md`.
 
 References: [Camera2CameraControl](https://developer.android.com/reference/androidx/camera/camera2/interop/Camera2CameraControl),
 [AVFoundation custom exposure](https://developer.apple.com/documentation/avfoundation/avcapturedevice/setexposuremodecustom(duration:iso:completionhandler:)),

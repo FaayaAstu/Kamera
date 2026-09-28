@@ -10,8 +10,8 @@ plugins {
     alias(libs.plugins.dokka)
 }
 
-group = "com.kashif.camera_compose"
-version = "1.2"
+group = "io.faaya.kamera"
+version = "1.2.0-faaya.1"
 
 kotlin {
     jvmToolchain(17)
@@ -21,7 +21,6 @@ kotlin {
     jvm("desktop")
 
     listOf(
-        iosX64(),
         iosArm64(),
         iosSimulatorArm64(),
     ).forEach {
@@ -50,7 +49,7 @@ kotlin {
         }
 
         commonTest.dependencies {
-            api(kotlin("test"))
+            implementation(kotlin("test"))
 
             // Test-only, and it must stay that way. On the runtime classpath, coroutines-test
             // installs TestMainDispatcherFactory via ServiceLoader, which takes over
@@ -116,9 +115,9 @@ tasks.named<Jar>("allMetadataJar") {
 
 mavenPublishing {
     coordinates(
-        groupId = "io.github.kashif-mehmood-km",
+        groupId = "io.faaya.kamera",
         artifactId = "camerak",
-        version = "1.2",
+        version = "1.2.0-faaya.1",
     )
 
     pom {

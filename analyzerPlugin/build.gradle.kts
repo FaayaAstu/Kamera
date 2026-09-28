@@ -9,8 +9,8 @@ plugins {
     id("com.vanniktech.maven.publish") version "0.31.0"
 }
 
-group = "com.kashif.analyzer_plugin"
-version = "1.2"
+group = "io.faaya.kamera"
+version = "1.2.0-faaya.1"
 
 kotlin {
     jvmToolchain(17)
@@ -20,7 +20,6 @@ kotlin {
 
     jvm("desktop")
     listOf(
-        iosX64(),
         iosArm64(),
         iosSimulatorArm64(),
     ).forEach {
@@ -81,9 +80,9 @@ android {
 
 mavenPublishing {
     coordinates(
-        groupId = "io.github.kashif-mehmood-km",
+        groupId = "io.faaya.kamera",
         artifactId = "analyzer_plugin",
-        version = "1.2",
+        version = "1.2.0-faaya.1",
     )
 
     pom {

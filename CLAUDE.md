@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-CameraK is a Kotlin Multiplatform (KMP) camera library for Compose Multiplatform, targeting Android (CameraX), iOS (AVFoundation), and Desktop/JVM (JavaCV). Published to Maven Central under `io.github.kashif-mehmood-km`.
+CameraK is a Kotlin Multiplatform (KMP) camera library for Compose Multiplatform, targeting Android (CameraX), iOS (AVFoundation), and Desktop/JVM (JavaCV). Upstream is published under `io.github.kashif-mehmood-km`; the Faaya core/analyzer use unpublished `io.faaya.kamera` coordinates and a local composite build.
 
 ## Build Commands
 
@@ -34,7 +34,7 @@ Tests live in each module's `commonTest` (e.g. `cameraK/src/commonTest`). They r
 - **iosApp/** - iOS Xcode project for Swift integration
 - **convention-plugins/** - Shared Gradle build logic (Maven publishing)
 
-All library modules target: `androidTarget`, `jvm("desktop")`, `iosX64()`, `iosArm64()`, `iosSimulatorArm64()`.
+All library modules target: `androidTarget`, `jvm("desktop")`, `iosArm64()`, `iosSimulatorArm64()` (Compose 1.11 does not support Intel iOS simulators).
 
 ## Architecture
 
