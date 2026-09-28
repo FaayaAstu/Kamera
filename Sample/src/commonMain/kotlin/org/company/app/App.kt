@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBars
@@ -30,8 +31,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -46,6 +49,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -353,13 +357,23 @@ private fun CameraScreen(
 ) {
     val scope = rememberCoroutineScope()
     val cameraController = cameraState.controller
+    val proState by cameraController.proCameraState.collectAsState()
+    var controlError by remember { mutableStateOf<String?>(null) }
+    fun runCameraControl(action: () -> Unit) {
+        try {
+            action()
+            controlError = null
+        } catch (error: Exception) {
+            controlError = error.message
+        }
+    }
     var imageBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
     var isCapturing by remember { mutableStateOf(false) }
 
     // Re-apply the selected camera device type whenever the controller is (re)created — config
     // re-inits (aspect ratio, etc.) start from the default, so this preserves the user's choice.
     LaunchedEffect(cameraController) {
-        cameraController.setPreferredCameraDeviceType(cameraDeviceType)
+        runCameraControl { cameraController.setPreferredCameraDeviceType(cameraDeviceType) }
     }
 
     var cameraMode by remember { mutableStateOf(CameraMode.Photo) }
@@ -367,6 +381,7 @@ private fun CameraScreen(
     var recordingDurationMs by remember { mutableStateOf(0L) }
 
     var flashMode by remember { mutableStateOf(FlashMode.OFF) }
+    LaunchedEffect(proState.settings) { flashMode = cameraController.getFlashMode() ?: FlashMode.OFF }
     var torchMode by remember { mutableStateOf(TorchMode.OFF) }
     var zoomLevel by remember { mutableFloatStateOf(1f) }
     var maxZoom by remember { mutableFloatStateOf(1f) }
@@ -481,8 +496,10 @@ private fun CameraScreen(
             isRecording = isRecording,
             recordingDurationMs = recordingDurationMs,
             onFlashToggle = {
-                cameraController.toggleFlashMode()
-                flashMode = cameraController.getFlashMode() ?: FlashMode.OFF
+                runCameraControl {
+                    cameraController.toggleFlashMode()
+                    flashMode = cameraController.getFlashMode() ?: FlashMode.OFF
+                }
             },
             onTorchToggle = {
                 cameraController.toggleTorchMode()
@@ -545,11 +562,13 @@ private fun CameraScreen(
                 Box(modifier = Modifier.graphicsLayer { rotationZ = orientationRotation }) {
                     CameraFlipButton(
                         onClick = {
-                            cameraController.toggleCameraLens()
-                            maxZoom = cameraController.getMaxZoom()
-                            zoomLevel = 1f
+                            runCameraControl {
+                                cameraController.toggleCameraLens()
+                                maxZoom = cameraController.getMaxZoom()
+                                zoomLevel = 1f
+                            }
                         },
-                        enabled = !isRecording,
+                        enabled = !isRecording && !isCapturing,
                     )
                 }
 
@@ -591,6 +610,7 @@ private fun CameraScreen(
 
         if (showSettings) {
             SettingsPanel(
+                cameraController = cameraController,
                 modifier = Modifier.align(Alignment.BottomCenter),
                 resolution = resolution,
                 imageFormat = imageFormat,
@@ -608,7 +628,7 @@ private fun CameraScreen(
                 onCameraDeviceTypeChange = {
                     if (!isRecording) {
                         onCameraDeviceTypeChange(it)
-                        cameraController.setPreferredCameraDeviceType(it) // live re-bind
+                        runCameraControl { cameraController.setPreferredCameraDeviceType(it) } // live re-bind
                     }
                 },
                 onQRScanningToggle = { isQRScanningEnabled = it },
@@ -621,6 +641,8 @@ private fun CameraScreen(
             )
         }
 
+        if (!showSettings) MotionReadout(cameraController, Modifier.align(Alignment.CenterEnd).padding(16.dp))
+        controlError?.let { Text(it, Modifier.align(Alignment.Center).padding(16.dp), color = Color.Red) }
         CapturedImagePreview(imageBitmap = imageBitmap) { imageBitmap = null }
     }
 }
@@ -937,6 +959,7 @@ private fun SettingsButton(isOpen: Boolean, onClick: () -> Unit) {
 
 @Composable
 private fun SettingsPanel(
+    cameraController: CameraController,
     modifier: Modifier = Modifier,
     resolution: Pair<Int, Int>?,
     imageFormat: ImageFormat,
@@ -964,7 +987,7 @@ private fun SettingsPanel(
         shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
     ) {
         Column(
-            modifier = Modifier.padding(20.dp),
+            modifier = Modifier.heightIn(max = 600.dp).verticalScroll(rememberScrollState()).padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             // Header
@@ -1021,7 +1044,14 @@ private fun SettingsPanel(
             // Camera Device Type
             SettingRow(icon = Lucide.Monitor, label = "Camera Type") {
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(CameraDeviceType.entries.toList()) { type ->
+                    items(
+                        (
+                            cameraController.getCameraCapabilities().availableDeviceTypes(
+                                cameraController.getCameraLens() ?: CameraLens.BACK,
+                            ) +
+                                CameraDeviceType.DEFAULT
+                            ).toList(),
+                    ) { type ->
                         Chip(
                             label = type.name.replace("_", " "),
                             selected = type == cameraDeviceType,
@@ -1034,6 +1064,8 @@ private fun SettingsPanel(
             // Plugin toggles
             SettingToggle(Lucide.ScanLine, "QR Scanner", isQRScanningEnabled, onQRScanningToggle)
             SettingToggle(Lucide.Type, "OCR (Text Recognition)", isOCREnabled, onOCRToggle)
+
+            ProCameraControlsPanel(cameraController)
 
             // Orientation lock
             SettingRow(icon = Lucide.AlignVerticalSpaceAround, label = "Orientation Lock (${deviceOrientation.name})") {

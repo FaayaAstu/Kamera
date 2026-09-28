@@ -1,5 +1,6 @@
 package com.kashif.cameraK.controller
 
+import com.kashif.cameraK.capabilities.CameraCapabilities
 import com.kashif.cameraK.enums.AspectRatio
 import com.kashif.cameraK.enums.CameraDeviceType
 import com.kashif.cameraK.enums.CameraLens
@@ -8,14 +9,45 @@ import com.kashif.cameraK.enums.FlashMode
 import com.kashif.cameraK.enums.ImageFormat
 import com.kashif.cameraK.enums.QualityPrioritization
 import com.kashif.cameraK.enums.TorchMode
+import com.kashif.cameraK.focus.FocusPoint
+import com.kashif.cameraK.focus.TapFocusResult
+import com.kashif.cameraK.motion.CameraMotionState
+import com.kashif.cameraK.pro.ProCameraSettings
+import com.kashif.cameraK.pro.ProCameraState
 import com.kashif.cameraK.result.ImageCaptureResult
 import com.kashif.cameraK.video.VideoCaptureResult
 import com.kashif.cameraK.video.VideoConfiguration
+import kotlinx.coroutines.flow.StateFlow
 
 /**
  * Interface defining the core functionalities of the CameraController.
  */
 expect class CameraController {
+
+    /** Selected-lens ranges and last successfully applied pro settings. */
+    val proCameraState: StateFlow<ProCameraState>
+
+    /** Validate and apply controls. Call after Ready; throws on unsupported/out-of-range settings. */
+    suspend fun applyProCameraSettings(settings: ProCameraSettings): ProCameraSettings
+
+    /**
+     * Focus at a normalized point in CameraPreviewView's overlay. Auto exposure also meters there.
+     * Preserves manual exposure; returns MANUAL_FOCUS_ACTIVE without changing manual focus.
+     * Call after preview layout. A new request replaces the old one. Cancellation resets metering.
+     */
+    suspend fun focusAt(point: FocusPoint): TapFocusResult
+
+    /** Cancel a tap request and restore default auto metering. Call on the main thread. */
+    fun cancelTapFocus()
+
+    /** Opt-in fused gyro/gravity tracking. Start/stop on the main thread; automatically pauses in background. */
+    val motionState: StateFlow<CameraMotionState>
+    fun startMotionTracking(intervalMs: Int = 50)
+    fun stopMotionTracking()
+
+    /** Set current gravity direction as reference. False if no fresh reading is available. */
+    fun calibrateMotion(): Boolean
+    fun clearMotionCalibration()
 
     /**
      * Captures an image and saves it directly to a file.
@@ -117,12 +149,33 @@ expect class CameraController {
      * Switches to a different camera device type at runtime.
      *
      * On iOS this switches between wide-angle, telephoto, ultra-wide, etc.
-     * On Android this is a no-op (CameraX handles device selection automatically).
+     * On Android this resolves the request against the device's classified lenses
+     * (ultra-wide/telephoto/macro, including physical sub-lenses of logical multi-cameras)
+     * and switches to the matching one; if the requested type isn't available on the current
+     * facing, it falls back to the default camera and logs a warning. Check
+     * [CameraCapabilities.availableDeviceTypes] first to know which types will actually switch
+     * lenses on this device.
      * On Desktop this is a no-op (single camera).
      *
      * @param deviceType The desired [CameraDeviceType] to switch to.
      */
     fun setPreferredCameraDeviceType(deviceType: CameraDeviceType)
+
+    /**
+     * Returns a snapshot of the device's camera hardware: every lens with its
+     * classified type (ultra-wide / wide / telephoto / macro), facing, zoom range
+     * and flash availability.
+     *
+     * Use [CameraCapabilities.availableDeviceTypes] to know which values of
+     * [setPreferredCameraDeviceType] will actually switch lenses on this device.
+     *
+     * Platform notes:
+     * - Android: enumerated via Camera2, including physical sub-lenses of logical
+     *   multi-cameras. Cached after the first call.
+     * - iOS: enumerated via AVCaptureDeviceDiscoverySession.
+     * - Desktop: reports a single DEFAULT lens.
+     */
+    fun getCameraCapabilities(): CameraCapabilities
 
     /**
      * Sets the zoom level.

@@ -1,5 +1,7 @@
 package com.kashif.cameraK.controller
 
+import com.kashif.cameraK.capabilities.CameraCapabilities
+import com.kashif.cameraK.capabilities.LensInfo
 import com.kashif.cameraK.enums.AspectRatio
 import com.kashif.cameraK.enums.CameraDeviceType
 import com.kashif.cameraK.enums.CameraLens
@@ -9,6 +11,13 @@ import com.kashif.cameraK.enums.FlashMode
 import com.kashif.cameraK.enums.ImageFormat
 import com.kashif.cameraK.enums.QualityPrioritization
 import com.kashif.cameraK.enums.TorchMode
+import com.kashif.cameraK.focus.FocusPoint
+import com.kashif.cameraK.focus.TapFocusResult
+import com.kashif.cameraK.motion.CameraMotionState
+import com.kashif.cameraK.motion.DesktopCameraMotionTracker
+import com.kashif.cameraK.pro.ProCameraSettings
+import com.kashif.cameraK.pro.ProCameraState
+import com.kashif.cameraK.pro.validated
 import com.kashif.cameraK.result.ImageCaptureResult
 import com.kashif.cameraK.utils.CameraKLogger
 import com.kashif.cameraK.video.VideoCaptureResult
@@ -20,6 +29,9 @@ import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -44,6 +56,19 @@ actual class CameraController(
     private val targetResolution: Pair<Int, Int>? = null,
     private val aspectRatio: AspectRatio = AspectRatio.RATIO_16_9,
 ) {
+    actual suspend fun focusAt(point: FocusPoint): TapFocusResult = TapFocusResult.UNSUPPORTED
+    actual fun cancelTapFocus() = Unit
+    private val motionTracker = DesktopCameraMotionTracker()
+    actual val motionState: StateFlow<CameraMotionState> = motionTracker.state
+    private val mutableProState = MutableStateFlow(ProCameraState())
+    actual val proCameraState: StateFlow<ProCameraState> = mutableProState.asStateFlow()
+    actual suspend fun applyProCameraSettings(settings: ProCameraSettings): ProCameraSettings =
+        settings.validated(mutableProState.value.capabilities)
+
+    actual fun startMotionTracking(intervalMs: Int) = motionTracker.start(intervalMs)
+    actual fun stopMotionTracking() = motionTracker.stop()
+    actual fun calibrateMotion(): Boolean = motionTracker.calibrate()
+    actual fun clearMotionCalibration() = motionTracker.clearCalibration()
     private var cameraGrabber: CameraGrabber? = null
     private val _frameFlow = MutableSharedFlow<BufferedImage>(
         replay = 0,
@@ -179,6 +204,20 @@ actual class CameraController(
         // No-op on desktop — single camera
     }
 
+    actual fun getCameraCapabilities(): CameraCapabilities = CameraCapabilities(
+        listOf(
+            LensInfo(
+                id = "",
+                deviceType = CameraDeviceType.DEFAULT,
+                lens = CameraLens.BACK,
+                minZoom = 1f,
+                maxZoom = 1f,
+                hasFlash = false,
+                isLogical = false,
+            ),
+        ),
+    )
+
     /**
      * Sets the zoom level.
      *
@@ -253,6 +292,7 @@ actual class CameraController(
     }
 
     actual fun cleanup() {
+        motionTracker.close()
         stopVideoRecorderIfActive()
         cameraGrabber?.stop()
     }

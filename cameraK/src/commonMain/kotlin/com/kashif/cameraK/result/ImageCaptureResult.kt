@@ -1,5 +1,7 @@
 package com.kashif.cameraK.result
 
+import com.kashif.cameraK.motion.MotionCaptureSnapshot
+
 /**
  * Sealed class representing the result of an image capture operation.
  */
@@ -29,7 +31,11 @@ sealed class ImageCaptureResult {
      *
      * @param filePath The absolute path to the captured image file.
      */
-    data class SuccessWithFile(val filePath: String) : ImageCaptureResult()
+    data class SuccessWithFile(
+        val filePath: String,
+        /** Fresh attitude at capture REQUEST time, not the exact shutter timestamp. Null if disabled/unavailable/stale. */
+        val motionAtCaptureRequest: MotionCaptureSnapshot? = null,
+    ) : ImageCaptureResult()
 
     /**
      * Represents a failed image capture.

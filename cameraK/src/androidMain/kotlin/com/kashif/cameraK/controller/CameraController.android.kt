@@ -2,7 +2,7 @@ package com.kashif.cameraK.controller
 
 import android.content.Context
 import android.content.pm.PackageManager
-import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
 import android.os.Environment
 import android.util.Rational
 import android.util.Size
@@ -10,6 +10,7 @@ import android.view.OrientationEventListener
 import android.view.Surface
 import androidx.annotation.OptIn
 import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
@@ -36,6 +37,9 @@ import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
+import com.kashif.cameraK.capabilities.AndroidLensDescriptor
+import com.kashif.cameraK.capabilities.CameraCapabilities
+import com.kashif.cameraK.capabilities.LensEnumerator
 import com.kashif.cameraK.enums.AspectRatio
 import com.kashif.cameraK.enums.CameraDeviceType
 import com.kashif.cameraK.enums.CameraLens
@@ -45,6 +49,15 @@ import com.kashif.cameraK.enums.FlashMode
 import com.kashif.cameraK.enums.ImageFormat
 import com.kashif.cameraK.enums.QualityPrioritization
 import com.kashif.cameraK.enums.TorchMode
+import com.kashif.cameraK.focus.AndroidTapFocus
+import com.kashif.cameraK.focus.FocusPoint
+import com.kashif.cameraK.focus.TapFocusResult
+import com.kashif.cameraK.motion.AndroidCameraMotionTracker
+import com.kashif.cameraK.motion.CameraMotionState
+import com.kashif.cameraK.pro.AndroidProCameraControls
+import com.kashif.cameraK.pro.ProCameraSettings
+import com.kashif.cameraK.pro.ProCameraState
+import com.kashif.cameraK.pro.validated
 import com.kashif.cameraK.result.ImageCaptureResult
 import com.kashif.cameraK.utils.CameraKLogger
 import com.kashif.cameraK.utils.InvalidConfigurationException
@@ -55,8 +68,17 @@ import com.kashif.cameraK.video.VideoConfiguration
 import com.kashif.cameraK.video.VideoQuality
 import kotlinx.atomicfu.atomic
 import kotlinx.coroutines.CancellableContinuation
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.text.SimpleDateFormat
@@ -82,6 +104,73 @@ actual class CameraController(
     internal var targetResolution: Pair<Int, Int>? = null,
     internal var mirrorFrontCamera: Boolean = false,
 ) {
+
+    private val motionTracker = AndroidCameraMotionTracker(context, lifecycleOwner)
+    actual val motionState: StateFlow<CameraMotionState> = motionTracker.state
+    private val proControls = AndroidProCameraControls(ContextCompat.getMainExecutor(context))
+    private val proScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var disableZslForProControls = false
+    private val proSettingsMutex = Mutex()
+    private var applyingProSettings = false
+    actual val proCameraState: StateFlow<ProCameraState> = proControls.state
+    private val tapFocus = AndroidTapFocus()
+
+    actual suspend fun focusAt(point: FocusPoint): TapFocusResult = withContext(Dispatchers.Main.immediate) {
+        val current = camera
+        val preview = previewView
+        if (current == null ||
+            preview == null ||
+            applyingProSettings ||
+            proControls.isApplying ||
+            pendingCaptures.value != 0 ||
+            proCameraState.value.errorMessage != null ||
+            !lifecycleOwner.lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)
+        ) {
+            TapFocusResult.NOT_READY
+        } else {
+            tapFocus.focus(current, preview, point, proCameraState.value.settings)
+        }
+    }
+
+    actual fun cancelTapFocus() = tapFocus.cancel()
+
+    actual suspend fun applyProCameraSettings(settings: ProCameraSettings): ProCameraSettings =
+        withContext(Dispatchers.Main.immediate) {
+            proSettingsMutex.withLock {
+                require(settings.manualExposure == null || flashMode == FlashMode.OFF) {
+                    "Manual exposure requires flash OFF"
+                }
+                settings.validated(proCameraState.value.capabilities)
+                check(pendingCaptures.value == 0) { "Cannot change pro controls during capture" }
+                cancelTapFocus()
+                applyingProSettings = true
+                try {
+                    // ZSL may select a buffered frame taken BEFORE the user's control change.
+                    // Keep the fast non-ZSL pipeline once pro controls have been used.
+                    if (!disableZslForProControls &&
+                        qualityPriority == QualityPrioritization.SPEED &&
+                        settings != ProCameraSettings()
+                    ) {
+                        check(activeRecording == null) { "Stop recording before enabling pro controls" }
+                        val view = previewView ?: error("Camera not ready")
+                        disableZslForProControls = true
+                        kotlinx.coroutines.withTimeout(5000) {
+                            suspendCancellableCoroutine<Unit> { continuation ->
+                                bindCamera(view) { if (continuation.isActive) continuation.resume(Unit) }
+                            }
+                        }
+                    }
+                    proControls.apply(settings)
+                } finally {
+                    applyingProSettings = false
+                }
+            }
+        }
+
+    actual fun startMotionTracking(intervalMs: Int) = motionTracker.start(intervalMs)
+    actual fun stopMotionTracking() = motionTracker.stop()
+    actual fun calibrateMotion(): Boolean = motionTracker.calibrate()
+    actual fun clearMotionCalibration() = motionTracker.clearCalibration()
 
     private var cameraProvider: ProcessCameraProvider? = null
     private var imageCapture: ImageCapture? = null
@@ -118,6 +207,23 @@ actual class CameraController(
     private val imageProcessingExecutor = Executors.newFixedThreadPool(2)
     private val analyzerExecutor = Executors.newSingleThreadExecutor()
 
+    // Hardware doesn't change at runtime; enumerate once.
+    private var cachedLensSnapshot: List<AndroidLensDescriptor>? = null
+
+    // Set by createCameraSelector when the requested device type is a physical sub-lens of a
+    // logical multi-camera. CameraSelector.setPhysicalCameraId ALONE silently no-ops on real
+    // hardware — it must be paired with Camera2Interop.Extender.setPhysicalCameraId on EVERY
+    // use-case builder (verified on real hardware). Consulted by bindCamera,
+    // configureCaptureUseCase and rebuildMultiplexedAnalyzer.
+    private var pinnedPhysicalId: String? = null
+
+    internal fun lensSnapshot(): List<AndroidLensDescriptor> =
+        cachedLensSnapshot ?: LensEnumerator.snapshot(context).also {
+            // Don't cache an empty result: a transient camera-service failure on the first call
+            // would otherwise permanently disable lens switching for the controller's lifetime.
+            if (it.isNotEmpty()) cachedLensSnapshot = it
+        }
+
     // Portrait/landscape category of the display rotation used to build the current ViewPort. The
     // ViewPort is immutable once bound, so when the display flips category we must rebind to rebuild
     // it — otherwise the capture crop stays at the old orientation (reintroduces #136 after rotation).
@@ -128,7 +234,9 @@ actual class CameraController(
     @Volatile
     private var pendingViewPortRebind = false
 
+    @OptIn(ExperimentalCamera2Interop::class)
     fun bindCamera(previewView: PreviewView, onCameraReady: () -> Unit = {}) {
+        cancelTapFocus()
         this.previewView = previewView
 
         memoryManager.initialize(context)
@@ -140,19 +248,29 @@ actual class CameraController(
                 cameraProvider?.unbindAll()
 
                 val resolutionSelector = createResolutionSelector()
+                // Must run before any use-case builder: it decides pinnedPhysicalId.
+                val cameraSelector = createCameraSelector()
 
                 preview = Preview.Builder()
                     .setResolutionSelector(resolutionSelector)
+                    .apply { pinnedPhysicalId?.let { Camera2Interop.Extender(this).setPhysicalCameraId(it) } }
                     .build()
                     .also {
                         it.setSurfaceProvider(previewView.surfaceProvider)
                     }
 
-                val cameraSelector = createCameraSelector()
-
                 configureCaptureUseCase(resolutionSelector)
                 // Only build VideoCapture when a recording is active/about to start — see field doc.
                 if (includeVideoUseCase) configureVideoCaptureUseCase(pendingVideoQuality) else videoCapture = null
+
+                // Rebuild rather than reuse the existing instance: its baked-in Camera2Interop pin
+                // reflects the PREVIOUS lens/device type. Reusing it after a switch would silently
+                // analyze frames from the wrong physical camera (or lose the pin). Constructed here
+                // (after createCameraSelector set pinnedPhysicalId, before the use-case group is
+                // assembled below) so it binds via this bindToLifecycle call, not a second nested one.
+                if (registeredAnalyzers.isNotEmpty()) {
+                    imageAnalyzer = buildMultiplexedAnalyzer()
+                }
 
                 // Align capture rotation with the display rotation that also drives the ViewPort and
                 // the preview box, so all three agree (WYSIWYG). Relying on the accelerometer
@@ -184,7 +302,17 @@ actual class CameraController(
                     useCaseGroup,
                 )
 
-                onCameraReady()
+                val boundCamera = camera ?: error("Camera binding failed")
+                val cameraId = pinnedPhysicalId ?: Camera2CameraInfo.from(boundCamera.cameraInfo).cameraId
+                val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+                proScope.launch {
+                    try {
+                        proControls.bind(boundCamera, cameraId, manager.getCameraCharacteristics(cameraId))
+                        onCameraReady()
+                    } catch (error: Exception) {
+                        CameraKLogger.e("CameraK", "Pro controls initialization failed", error)
+                    }
+                }
             } catch (exc: Exception) {
                 CameraKLogger.e("CameraK", "==> Use case binding failed for $cameraDeviceType: ${exc.message}")
                 CameraKLogger.e("CameraK", "Unhandled exception", exc)
@@ -280,93 +408,77 @@ actual class CameraController(
     }
 
     /**
-     * Creates a camera selector based on lens facing and device type.
+     * Creates a camera selector for the current facing + requested device type, resolved
+     * against the real lens snapshot (35mm-equivalent classification) instead of raw
+     * focal-length thresholds.
      *
-     * Uses Camera2 Interop to access physical camera characteristics for proper
-     * device type selection (telephoto, ultra-wide, macro). Falls back gracefully
-     * to the default camera if the requested type is not available.
-     *
-     * @return CameraSelector configured for the current lens and device type
+     * - WIDE_ANGLE/DEFAULT: no filter (the default logical camera opens wide).
+     * - Requested type maps to a top-level camera id: exact-id filter.
+     * - Requested type maps to a physical sub-lens: physical-camera pin (selector half;
+     *   the use-case builders apply the Camera2Interop half via [pinnedPhysicalId]).
+     * - Type unavailable on this facing: warn and fall back to the default camera.
      */
     @OptIn(ExperimentalCamera2Interop::class)
     private fun createCameraSelector(): CameraSelector {
+        pinnedPhysicalId = null
         val builder = CameraSelector.Builder()
             .requireLensFacing(cameraLens.toCameraXLensFacing())
 
-        when (cameraDeviceType) {
-            CameraDeviceType.WIDE_ANGLE, CameraDeviceType.DEFAULT -> {
-                // Default camera, no filter needed
-            }
-            CameraDeviceType.TELEPHOTO -> {
-                builder.addCameraFilter { cameraInfos ->
-                    cameraInfos.filter { cameraInfo ->
-                        try {
-                            val camera2Info = Camera2CameraInfo.from(cameraInfo)
-                            val focalLengths = camera2Info.getCameraCharacteristic(
-                                CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS,
-                            )?.toList() ?: emptyList()
-                            focalLengths.any { it > 4.0f }
-                        } catch (e: Exception) {
-                            false
-                        }
-                    }.ifEmpty {
-                        CameraKLogger.w("CameraK", "Telephoto camera not available, using default")
-                        cameraInfos.take(1)
-                    }
-                }
-            }
-            CameraDeviceType.ULTRA_WIDE -> {
-                builder.addCameraFilter { cameraInfos ->
-                    cameraInfos.filter { cameraInfo ->
-                        try {
-                            val camera2Info = Camera2CameraInfo.from(cameraInfo)
-                            val focalLengths = camera2Info.getCameraCharacteristic(
-                                CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS,
-                            )?.toList() ?: emptyList()
-                            focalLengths.any { it < 2.5f }
-                        } catch (e: Exception) {
-                            false
-                        }
-                    }.ifEmpty {
-                        CameraKLogger.w("CameraK", "Ultra-wide camera not available, using default")
-                        cameraInfos.take(1)
-                    }
-                }
-            }
-            CameraDeviceType.MACRO -> {
-                builder.addCameraFilter { cameraInfos ->
-                    cameraInfos.filter { cameraInfo ->
-                        try {
-                            val camera2Info = Camera2CameraInfo.from(cameraInfo)
-                            val minFocusDistance = camera2Info.getCameraCharacteristic(
-                                CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE,
-                            ) ?: 0f
-                            minFocusDistance > 0f && minFocusDistance < 0.2f
-                        } catch (e: Exception) {
-                            false
-                        }
-                    }.ifEmpty {
-                        CameraKLogger.w("CameraK", "Macro camera not available, using default")
-                        cameraInfos.take(1)
-                    }
-                }
-            }
+        if (cameraDeviceType == CameraDeviceType.DEFAULT || cameraDeviceType == CameraDeviceType.WIDE_ANGLE) {
+            return builder.build()
         }
 
-        return builder.build()
+        val target = lensSnapshot().firstOrNull {
+            it.info.lens == cameraLens && it.info.deviceType == cameraDeviceType
+        }
+        if (target == null) {
+            CameraKLogger.w("CameraK", "$cameraDeviceType not available for $cameraLens, using default camera")
+            return builder.build()
+        }
+
+        return if (target.isPhysicalChild) {
+            pinnedPhysicalId = target.info.id
+            // setPhysicalCameraId ALONE does not influence which logical camera CameraSelector
+            // picks: CameraSelector.select() (verified against CameraX 1.5.1 source) resolves
+            // purely from the CameraFilter set, and the physical id is only consulted later by
+            // the use-case builders' Camera2Interop.Extender. Without this filter, on a facing
+            // with multiple logical multi-cameras, selection could land on the wrong logical
+            // camera while still (silently) trying to pin a physical id that belongs to a
+            // different one. Constrain selection to the physical child's parent logical camera;
+            // fall back to the unfiltered set if for some reason it's not offered.
+            builder.setPhysicalCameraId(target.info.id)
+                .addCameraFilter { cameraInfos ->
+                    cameraInfos.filter { Camera2CameraInfo.from(it).cameraId == target.parentLogicalId }
+                        .ifEmpty { cameraInfos }
+                }.build()
+        } else {
+            builder.addCameraFilter { cameraInfos ->
+                cameraInfos.filter { Camera2CameraInfo.from(it).cameraId == target.info.id }
+                    .ifEmpty {
+                        CameraKLogger.w("CameraK", "Camera ${target.info.id} not offered by CameraX, using default")
+                        cameraInfos
+                    }
+            }.build()
+        }
     }
 
     /**
      * Configure the image capture use case with settings adapted to current memory conditions
      */
-    @OptIn(ExperimentalZeroShutterLag::class)
+    @OptIn(ExperimentalZeroShutterLag::class, ExperimentalCamera2Interop::class)
     private fun configureCaptureUseCase(resolutionSelector: ResolutionSelector) {
         imageCapture = ImageCapture.Builder()
             .setFlashMode(flashMode.toCameraXFlashMode())
             .setCaptureMode(
                 when (qualityPriority) {
                     QualityPrioritization.QUALITY -> ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY
-                    QualityPrioritization.SPEED -> ImageCapture.CAPTURE_MODE_ZERO_SHUTTER_LAG
+                    QualityPrioritization.SPEED -> {
+                        if (disableZslForProControls) {
+                            ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
+                        } else {
+                            ImageCapture.CAPTURE_MODE_ZERO_SHUTTER_LAG
+                        }
+                    }
                     QualityPrioritization.BALANCED -> ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
                     QualityPrioritization.NONE -> {
                         if (memoryManager.isUnderMemoryPressure()) {
@@ -378,17 +490,35 @@ actual class CameraController(
                 },
             )
             .setResolutionSelector(resolutionSelector)
+            .apply { pinnedPhysicalId?.let { Camera2Interop.Extender(this).setPhysicalCameraId(it) } }
             .build()
     }
 
     fun updateImageAnalyzer() {
         camera?.let {
+            if (activeRecording == null) {
+                // Not recording: rebind the whole camera so the analyzer is bound INSIDE the
+                // UseCaseGroup and shares its ViewPort crop, instead of being bound alone with its
+                // own selector outside the group (which skipped the shared crop and could diverge
+                // from the group on any future config). previewView is set by bindCamera, so this
+                // is only null if updateImageAnalyzer is somehow called before the first bind —
+                // fall back to the old solo-bind path in that case.
+                val pv = previewView
+                if (pv != null) {
+                    bindCamera(pv)
+                    return
+                }
+            }
+            // Recording is active: a full rebind (unbindAll) would tear down the live VideoCapture
+            // session, so fall back to solo-binding just the analyzer outside the UseCaseGroup.
             cameraProvider?.unbind(imageAnalyzer)
             imageAnalyzer?.let { analyzer ->
                 cameraProvider?.bindToLifecycle(
                     lifecycleOwner,
-                    CameraSelector.Builder().requireLensFacing(cameraLens.toCameraXLensFacing())
-                        .build(),
+                    // Reuse createCameraSelector() rather than a bare lens-facing selector: a
+                    // pinned physical lens must carry the same selector-level pin as the main
+                    // bind, otherwise the analyzer silently reads frames from the default camera.
+                    createCameraSelector(),
                     analyzer,
                 )
             }
@@ -413,6 +543,26 @@ actual class CameraController(
         rebuildMultiplexedAnalyzer()
     }
 
+    /**
+     * Builds the multiplexed [ImageAnalysis] use case from [registeredAnalyzers], baking in
+     * [pinnedPhysicalId] via Camera2Interop. Construction only — does not bind. Callers that
+     * already own a bindToLifecycle call (bindCamera) apply the result to the same use-case
+     * group instead of triggering a redundant nested bind.
+     */
+    @OptIn(ExperimentalCamera2Interop::class)
+    private fun buildMultiplexedAnalyzer(): ImageAnalysis {
+        val composite = MultiplexingAnalyzer(registeredAnalyzers.toList())
+        return ImageAnalysis.Builder()
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .apply { pinnedPhysicalId?.let { Camera2Interop.Extender(this).setPhysicalCameraId(it) } }
+            .build()
+            .apply {
+                // Run analysis off the main thread — frame work (e.g. JPEG-encoding the analyzer
+                // frame, QR/OCR) is too heavy to block the UI thread.
+                setAnalyzer(analyzerExecutor, composite)
+            }
+    }
+
     private fun rebuildMultiplexedAnalyzer() {
         if (registeredAnalyzers.isEmpty()) {
             if (imageAnalyzer != null) {
@@ -424,15 +574,7 @@ actual class CameraController(
             return
         }
 
-        val composite = MultiplexingAnalyzer(registeredAnalyzers.toList())
-        imageAnalyzer = ImageAnalysis.Builder()
-            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-            .build()
-            .apply {
-                // Run analysis off the main thread — frame work (e.g. JPEG-encoding the analyzer
-                // frame, QR/OCR) is too heavy to block the UI thread.
-                setAnalyzer(analyzerExecutor, composite)
-            }
+        imageAnalyzer = buildMultiplexedAnalyzer()
 
         try {
             updateImageAnalyzer()
@@ -441,7 +583,19 @@ actual class CameraController(
         }
     }
 
-    actual suspend fun takePictureToFile(): ImageCaptureResult = suspendCancellableCoroutine { cont ->
+    actual suspend fun takePictureToFile(): ImageCaptureResult = try {
+        withContext(Dispatchers.Main.immediate) {
+            proSettingsMutex.withLock {
+                proControls.awaitReady()
+                captureFile()
+            }
+        }
+    } catch (error: Exception) {
+        if (error is kotlinx.coroutines.CancellationException) throw error
+        ImageCaptureResult.Error(error)
+    }
+
+    private suspend fun captureFile(): ImageCaptureResult = suspendCancellableCoroutine { cont ->
         if (pendingCaptures.incrementAndGet() > maxConcurrentCaptures) {
             pendingCaptures.decrementAndGet()
             CameraKLogger.w("CameraK", "Burst queue full, dropping frame")
@@ -469,6 +623,7 @@ actual class CameraController(
      * Directly saves to final destination and returns file path.
      */
     private fun performCaptureToFile(continuation: CancellableContinuation<ImageCaptureResult>) {
+        val motion = motionTracker.snapshot()
         // Create final output file directly in desired directory
         val outputFile = createFinalOutputFile()
         val outputOptions =
@@ -481,8 +636,9 @@ actual class CameraController(
                 override fun onImageSaved(output: ImageCapture.OutputFileResults) {
                     pendingCaptures.decrementAndGet()
 
-                    // Notify MediaStore so image appears in Gallery
-                    notifyMediaStore(outputFile)
+                    // App-private captures are handed to the host; scanning them leaves stale
+                    // gallery entries when the host moves the file into temporary storage.
+                    if (directory != Directory.DOCUMENTS) notifyMediaStore(outputFile)
 
                     // Notify capture listeners (e.g. ImageSaverPlugin auto-save) off the main
                     // thread, reading the just-saved file only when someone is listening.
@@ -493,7 +649,7 @@ actual class CameraController(
                         }
                     }
 
-                    continuation.resume(ImageCaptureResult.SuccessWithFile(outputFile.absolutePath))
+                    continuation.resume(ImageCaptureResult.SuccessWithFile(outputFile.absolutePath, motion))
                 }
 
                 override fun onError(exc: ImageCaptureException) {
@@ -510,15 +666,22 @@ actual class CameraController(
     }
 
     actual fun toggleFlashMode() {
-        flashMode = when (flashMode) {
-            FlashMode.OFF -> FlashMode.ON
-            FlashMode.ON -> FlashMode.AUTO
-            FlashMode.AUTO -> FlashMode.OFF
-        }
-        imageCapture?.flashMode = flashMode.toCameraXFlashMode()
+        setFlashMode(
+            when (flashMode) {
+                FlashMode.OFF -> FlashMode.ON
+                FlashMode.ON -> FlashMode.AUTO
+                FlashMode.AUTO -> FlashMode.OFF
+            },
+        )
     }
 
     actual fun setFlashMode(mode: FlashMode) {
+        check(!proControls.isApplying && !applyingProSettings && pendingCaptures.value == 0) {
+            "Wait for capture/control updates before changing flash"
+        }
+        require(mode == FlashMode.OFF || proCameraState.value.settings.manualExposure == null) {
+            "Manual exposure requires flash OFF"
+        }
         flashMode = mode
         imageCapture?.flashMode = mode.toCameraXFlashMode()
     }
@@ -559,7 +722,10 @@ actual class CameraController(
     }
 
     actual fun setZoom(zoomRatio: Float) {
-        camera?.cameraControl?.setZoomRatio(zoomRatio.coerceIn(1f, getMaxZoom()))
+        cancelTapFocus()
+        require(zoomRatio.isFinite()) { "Zoom must be finite" }
+        val zoom = camera?.cameraInfo?.zoomState?.value ?: return
+        camera?.cameraControl?.setZoomRatio(zoomRatio.coerceIn(zoom.minZoomRatio, zoom.maxZoomRatio))
     }
 
     actual fun getZoom(): Float = camera?.cameraInfo?.zoomState?.value?.zoomRatio ?: 1f
@@ -569,6 +735,9 @@ actual class CameraController(
     actual fun getTorchMode(): TorchMode? = torchMode
 
     actual fun toggleCameraLens() {
+        check(!proControls.isApplying && !applyingProSettings && pendingCaptures.value == 0) {
+            "Cannot switch lenses during capture or control updates"
+        }
         // A lens switch rebinds (unbindAll), which would tear down a live recording session.
         if (activeRecording != null) {
             CameraKLogger.w("CameraController", "Ignoring lens switch while recording")
@@ -596,6 +765,9 @@ actual class CameraController(
     actual fun getPreferredCameraDeviceType(): CameraDeviceType = cameraDeviceType
 
     actual fun setPreferredCameraDeviceType(deviceType: CameraDeviceType) {
+        check(!proControls.isApplying && !applyingProSettings && pendingCaptures.value == 0) {
+            "Cannot switch lenses during capture or control updates"
+        }
         if (cameraDeviceType == deviceType) return
         // Same as the lens switch: this rebinds and would kill a live recording.
         if (activeRecording != null) {
@@ -608,12 +780,16 @@ actual class CameraController(
         previewView?.let { bindCamera(it) }
     }
 
+    actual fun getCameraCapabilities(): CameraCapabilities = CameraCapabilities(lensSnapshot().map { it.info })
+
     actual fun startSession() {
         memoryManager.updateMemoryStatus()
         memoryManager.clearBufferPools()
     }
 
     actual fun stopSession() {
+        cancelTapFocus()
+        motionTracker.stop()
         cameraProvider?.unbindAll()
         memoryManager.clearBufferPools()
     }
@@ -976,6 +1152,10 @@ actual class CameraController(
      * Should be called when the controller is being destroyed
      */
     actual fun cleanup() {
+        cancelTapFocus()
+        motionTracker.close()
+        proControls.close()
+        proScope.cancel()
         orientationEventListener?.disable()
         orientationEventListener = null
         orientationChangedCallback = null

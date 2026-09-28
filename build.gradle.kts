@@ -42,3 +42,11 @@ spotless {
         endWithNewline()
     }
 }
+
+// Match Faayaverse's Android bytecode policy to avoid Kotlin coroutine / D8 lambda
+// inner-class naming collisions after desugaring the camera library.
+allprojects {
+    tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile>().configureEach {
+        compilerOptions.freeCompilerArgs.add("-Xlambdas=class")
+    }
+}

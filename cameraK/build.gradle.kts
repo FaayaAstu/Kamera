@@ -10,8 +10,8 @@ plugins {
     alias(libs.plugins.dokka)
 }
 
-group = "com.kashif.camera_compose"
-version = "1.1"
+group = "io.faaya.kamera"
+version = "1.2.0-faaya.1"
 
 kotlin {
     jvmToolchain(17)
@@ -21,7 +21,6 @@ kotlin {
     jvm("desktop")
 
     listOf(
-        iosX64(),
         iosArm64(),
         iosSimulatorArm64(),
     ).forEach {
@@ -40,7 +39,6 @@ kotlin {
 
         commonMain.dependencies {
             api(libs.kotlinx.coroutines.core)
-            api(libs.kotlinx.coroutines.test)
             api(libs.kermit)
             api(compose.ui)
             api(compose.material3)
@@ -51,7 +49,14 @@ kotlin {
         }
 
         commonTest.dependencies {
-            api(kotlin("test"))
+            implementation(kotlin("test"))
+
+            // Test-only, and it must stay that way. On the runtime classpath, coroutines-test
+            // installs TestMainDispatcherFactory via ServiceLoader, which takes over
+            // Dispatchers.Main and then throws "Dispatchers.Main was accessed when the platform
+            // dispatcher was absent and the test dispatcher was unset" in consumer apps that never
+            // call Dispatchers.setMain(). See issue #165.
+            implementation(libs.kotlinx.coroutines.test)
         }
 
         androidMain.dependencies {
@@ -102,11 +107,17 @@ android {
     }
 }
 
+// Google Play SDK Console ownership token: androidMain/resources puts it in the AAR's classes.jar;
+// this also puts it in the root (metadata) artifact, which is what the Maven coordinate resolves to.
+tasks.named<Jar>("allMetadataJar") {
+    from("src/androidMain/resources")
+}
+
 mavenPublishing {
     coordinates(
-        groupId = "io.github.kashif-mehmood-km",
+        groupId = "io.faaya.kamera",
         artifactId = "camerak",
-        version = "1.1",
+        version = "1.2.0-faaya.1",
     )
 
     pom {

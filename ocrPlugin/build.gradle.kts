@@ -11,7 +11,7 @@ plugins {
 }
 
 group = "com.kashif.ocr_plugin"
-version = "1.1"
+version = "1.2"
 
 kotlin {
     jvmToolchain(17)
@@ -21,7 +21,6 @@ kotlin {
 
     jvm("desktop")
     listOf(
-        iosX64(),
         iosArm64(),
         iosSimulatorArm64(),
     ).forEach {
@@ -84,7 +83,7 @@ mavenPublishing {
     coordinates(
         groupId = "io.github.kashif-mehmood-km",
         artifactId = "ocr_plugin",
-        version = "1.1",
+        version = "1.2",
     )
 
     pom {

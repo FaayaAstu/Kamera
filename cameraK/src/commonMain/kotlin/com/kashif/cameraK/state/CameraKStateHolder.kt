@@ -1,8 +1,12 @@
 package com.kashif.cameraK.state
 
 import androidx.compose.runtime.Stable
+import com.kashif.cameraK.capabilities.CameraCapabilities
 import com.kashif.cameraK.controller.CameraController
 import com.kashif.cameraK.enums.DeviceOrientation
+import com.kashif.cameraK.motion.CameraMotionState
+import com.kashif.cameraK.pro.ProCameraSettings
+import com.kashif.cameraK.pro.ProCameraState
 import com.kashif.cameraK.video.VideoConfiguration
 import kotlinx.atomicfu.locks.SynchronizedObject
 import kotlinx.atomicfu.locks.synchronized
@@ -107,6 +111,13 @@ class CameraKStateHolder(
      */
     val deviceOrientation: StateFlow<DeviceOrientation> = _deviceOrientation.asStateFlow()
 
+    private val _motionState = MutableStateFlow(CameraMotionState())
+    val motionState: StateFlow<CameraMotionState> = _motionState.asStateFlow()
+    private val _proCameraState = MutableStateFlow(ProCameraState())
+    val proCameraState: StateFlow<ProCameraState> = _proCameraState.asStateFlow()
+    private var motionStateJob: Job? = null
+    private var proCameraStateJob: Job? = null
+
     /**
      * CoroutineScope for plugins to launch their operations.
      *
@@ -164,6 +175,12 @@ class CameraKStateHolder(
             val newController = controllerFactory()
             controller = newController
 
+            motionStateJob?.cancel()
+            proCameraStateJob?.cancel()
+            motionStateJob = coroutineScope.launch { newController.motionState.collect { _motionState.value = it } }
+            proCameraStateJob =
+                coroutineScope.launch { newController.proCameraState.collect { _proCameraState.value = it } }
+
             // Start session
             newController.startSession()
 
@@ -193,6 +210,8 @@ class CameraKStateHolder(
                     uiState = _uiState.value,
                 )
         } catch (e: Exception) {
+            motionStateJob?.cancel()
+            proCameraStateJob?.cancel()
             synchronized(pluginLock) { isInitialized = false }
             _cameraState.value =
                 CameraKState.Error(
@@ -212,6 +231,10 @@ class CameraKStateHolder(
         if (!isInitialized) return
 
         try {
+            motionStateJob?.cancel()
+            proCameraStateJob?.cancel()
+            _motionState.value = CameraMotionState()
+            _proCameraState.value = ProCameraState()
             // Detach plugins BEFORE resetting recording state, so a recorder plugin can still see
             // isRecording == true in onDetach and stop the recording (emitting RecordingStopped)
             // before we tear the controller down. (Snapshot+clear under lock; onDetach outside it.)
@@ -322,6 +345,26 @@ class CameraKStateHolder(
      * @see cameraState To observe camera state and auto-activate
      */
     fun getController(): CameraController? = controller
+
+    /**
+     * Returns the device's camera hardware capabilities, or [CameraCapabilities.EMPTY]
+     * while the camera is not yet initialized.
+     */
+    fun getCameraCapabilities(): CameraCapabilities = controller?.getCameraCapabilities() ?: CameraCapabilities.EMPTY
+
+    suspend fun applyProCameraSettings(settings: ProCameraSettings): ProCameraSettings =
+        (controller ?: error("Camera not initialized")).applyProCameraSettings(settings)
+
+    /** Call on the main thread. Motion is opt-in and owned by the camera lifecycle. */
+    fun startMotionTracking(intervalMs: Int = 50) =
+        (controller ?: error("Camera not initialized")).startMotionTracking(intervalMs)
+    fun stopMotionTracking() {
+        controller?.stopMotionTracking()
+    }
+    fun calibrateMotion(): Boolean = controller?.calibrateMotion() ?: false
+    fun clearMotionCalibration() {
+        controller?.clearMotionCalibration()
+    }
 
     // ═══════════════════════════════════════════════════════════════
     // Camera Operations

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added in the Faaya fork
+- Selected-lens pro camera capabilities and validated ISO/shutter, focus and EV controls on Android/iOS.
+- Opt-in fused gyro/gravity angle tracking, calibration, lifecycle suspension and capture-request motion snapshots in cameraK.
+- Sample pro controls and shared validation/angle tests. See docs/pro-camera.md.
+- Faayaverse toolchain alignment (Gradle 9, Kotlin 2.4, Compose 1.11.1) and Faaya-owned core/analyzer artifact coordinates.
+- ARM64 device/simulator iOS targets; Compose 1.11 no longer supplies Intel simulator artifacts.
+- App-private Android DOCUMENTS captures skip gallery scanning before file ownership is handed to the host.
+
+### Fixed
+- Android pro-control acknowledgement timeout budgets include pipeline depth and pending long exposures, including resets to auto.
+- Android zoom uses the camera's actual minimum ratio instead of forcing a minimum of 1x.
+- Fused roll is unavailable near flat to prevent unstable gravity-based roll readings.
+- **`kotlinx-coroutines-test` shipped to consumers, breaking `Dispatchers.Main`** (#165): `cameraK` declared `kotlinx-coroutines-test` as an `api` dependency of `commonMain`, so it landed in the published POM at runtime scope and reached every app that depends on `camerak` — or on any plugin, since each one re-exports the core with `api`. That artifact registers a `TestMainDispatcherFactory` through `ServiceLoader`, which takes over `Dispatchers.Main`; an app that never calls `Dispatchers.setMain()` then dies with *"Dispatchers.Main was accessed when the platform dispatcher was absent and the test dispatcher was unset"*. Reported on Desktop/Windows, but the leak was on every target. The dependency is now test-only. Consumers who were unknowingly relying on it for their own tests must declare it themselves; the `configurations.all { exclude(...) }` workaround is no longer needed.
+- **Crash on Mac Catalyst during QR/barcode setup** (#70): the scanner assigned a fixed list of 13 metadata object types, but a Mac camera advertises far fewer (sometimes none). Assigning a type not in `availableMetadataObjectTypes` aborts the process (`NSInvalidArgumentException` in `_buildAndRunGraph`). CameraK now only ever assigns the intersection with the supported types, so QR scanning degrades gracefully on Mac/Catalyst instead of crashing. iPhone/iPad behavior is unchanged (all types remain supported). Note: this covers running an iOS app via Mac Catalyst; a native macOS (AppKit) target is not yet provided.
+
 ## [1.1] - 2026-06-30
 
 ### Fixed
@@ -54,4 +69,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Desktop Tesseract path resolution** (#51): dynamic tessdata lookup with graceful degradation.
 - **Desktop QR scanner** (#50): fixed malformed decode-hints `EnumMap` initialization.
 - **iOS image orientation** (#44): captures save in the correct orientation across portrait, landscape, and upside-down.
-
