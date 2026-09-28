@@ -9,6 +9,8 @@ import com.kashif.cameraK.enums.FlashMode
 import com.kashif.cameraK.enums.ImageFormat
 import com.kashif.cameraK.enums.QualityPrioritization
 import com.kashif.cameraK.enums.TorchMode
+import com.kashif.cameraK.focus.FocusPoint
+import com.kashif.cameraK.focus.TapFocusResult
 import com.kashif.cameraK.motion.CameraMotionState
 import com.kashif.cameraK.pro.ProCameraSettings
 import com.kashif.cameraK.pro.ProCameraState
@@ -27,6 +29,16 @@ expect class CameraController {
 
     /** Validate and apply controls. Call after Ready; throws on unsupported/out-of-range settings. */
     suspend fun applyProCameraSettings(settings: ProCameraSettings): ProCameraSettings
+
+    /**
+     * Focus at a normalized point in CameraPreviewView's overlay. Auto exposure also meters there.
+     * Preserves manual exposure; returns MANUAL_FOCUS_ACTIVE without changing manual focus.
+     * Call after preview layout. A new request replaces the old one. Cancellation resets metering.
+     */
+    suspend fun focusAt(point: FocusPoint): TapFocusResult
+
+    /** Cancel a tap request and restore default auto metering. Call on the main thread. */
+    fun cancelTapFocus()
 
     /** Opt-in fused gyro/gravity tracking. Start/stop on the main thread; automatically pauses in background. */
     val motionState: StateFlow<CameraMotionState>

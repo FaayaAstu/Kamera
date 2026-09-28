@@ -10,6 +10,9 @@ import com.kashif.cameraK.enums.FlashMode
 import com.kashif.cameraK.enums.ImageFormat
 import com.kashif.cameraK.enums.QualityPrioritization
 import com.kashif.cameraK.enums.TorchMode
+import com.kashif.cameraK.focus.AppleTapFocus
+import com.kashif.cameraK.focus.FocusPoint
+import com.kashif.cameraK.focus.TapFocusResult
 import com.kashif.cameraK.motion.AppleCameraMotionTracker
 import com.kashif.cameraK.motion.CameraMotionState
 import com.kashif.cameraK.pro.AppleProCameraControls
@@ -88,6 +91,25 @@ actual class CameraController(
     actual val motionState: StateFlow<CameraMotionState> = motionTracker.state
     private val proControls = AppleProCameraControls()
     actual val proCameraState: StateFlow<ProCameraState> = proControls.state
+    private val tapFocus = AppleTapFocus()
+
+    actual suspend fun focusAt(point: FocusPoint): TapFocusResult = withContext(Dispatchers.Main.immediate) {
+        val device = customCameraController.getCurrentCamera()
+        val layer = getCameraPreviewLayer()
+        if (device == null ||
+            layer == null ||
+            proControls.isApplying ||
+            isCapturing.value ||
+            proCameraState.value.errorMessage != null ||
+            customCameraController.captureSession?.isRunning() != true
+        ) {
+            TapFocusResult.NOT_READY
+        } else {
+            tapFocus.focus(device, layer, point, proCameraState.value.settings)
+        }
+    }
+
+    actual fun cancelTapFocus() = tapFocus.cancel()
 
     actual suspend fun applyProCameraSettings(settings: ProCameraSettings): ProCameraSettings =
         withContext(Dispatchers.Main.immediate) {
@@ -95,6 +117,7 @@ actual class CameraController(
                 "Manual exposure requires flash OFF"
             }
             check(!isCapturing.value) { "Cannot change pro controls during capture" }
+            cancelTapFocus()
             proControls.apply(settings).also {
                 customCameraController.useManualExposure = it.manualExposure != null
             }
@@ -192,6 +215,7 @@ actual class CameraController(
 
     private fun setupCamera() {
         customCameraController.onCameraChanged = { device ->
+            cancelTapFocus()
             proControls.bind(device)
             customCameraController.useManualExposure = proCameraState.value.settings.manualExposure != null
         }
@@ -477,6 +501,7 @@ actual class CameraController(
     actual fun getTorchMode(): TorchMode? = torchMode
 
     actual fun setZoom(zoomRatio: Float) {
+        cancelTapFocus()
         customCameraController.setZoom(zoomRatio)
     }
 
@@ -485,6 +510,7 @@ actual class CameraController(
     actual fun getMaxZoom(): Float = customCameraController.getMaxZoom()
 
     actual fun toggleCameraLens() {
+        cancelTapFocus()
         check(!proControls.isApplying && !isCapturing.value && movieFileOutput?.isRecording() != true) {
             "Cannot switch lenses during capture, recording or control updates"
         }
@@ -509,6 +535,7 @@ actual class CameraController(
     actual fun getPreferredCameraDeviceType(): CameraDeviceType = cameraDeviceType
 
     actual fun setPreferredCameraDeviceType(deviceType: CameraDeviceType) {
+        cancelTapFocus()
         check(!proControls.isApplying && !isCapturing.value && movieFileOutput?.isRecording() != true) {
             "Cannot switch lenses during capture, recording or control updates"
         }
@@ -533,6 +560,7 @@ actual class CameraController(
     }
 
     actual fun stopSession() {
+        cancelTapFocus()
         motionTracker.stop()
         customCameraController.stopSession()
     }
@@ -546,6 +574,7 @@ actual class CameraController(
     }
 
     actual fun cleanup() {
+        cancelTapFocus()
         motionTracker.close()
         proControls.close()
         customCameraController.onCameraChanged = null

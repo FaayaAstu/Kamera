@@ -11,6 +11,8 @@ import com.kashif.cameraK.enums.FlashMode
 import com.kashif.cameraK.enums.ImageFormat
 import com.kashif.cameraK.enums.QualityPrioritization
 import com.kashif.cameraK.enums.TorchMode
+import com.kashif.cameraK.focus.FocusPoint
+import com.kashif.cameraK.focus.TapFocusResult
 import com.kashif.cameraK.motion.CameraMotionState
 import com.kashif.cameraK.motion.DesktopCameraMotionTracker
 import com.kashif.cameraK.pro.ProCameraSettings
@@ -54,6 +56,8 @@ actual class CameraController(
     private val targetResolution: Pair<Int, Int>? = null,
     private val aspectRatio: AspectRatio = AspectRatio.RATIO_16_9,
 ) {
+    actual suspend fun focusAt(point: FocusPoint): TapFocusResult = TapFocusResult.UNSUPPORTED
+    actual fun cancelTapFocus() = Unit
     private val motionTracker = DesktopCameraMotionTracker()
     actual val motionState: StateFlow<CameraMotionState> = motionTracker.state
     private val mutableProState = MutableStateFlow(ProCameraState())

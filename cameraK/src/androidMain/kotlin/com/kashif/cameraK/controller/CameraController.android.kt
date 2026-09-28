@@ -49,6 +49,9 @@ import com.kashif.cameraK.enums.FlashMode
 import com.kashif.cameraK.enums.ImageFormat
 import com.kashif.cameraK.enums.QualityPrioritization
 import com.kashif.cameraK.enums.TorchMode
+import com.kashif.cameraK.focus.AndroidTapFocus
+import com.kashif.cameraK.focus.FocusPoint
+import com.kashif.cameraK.focus.TapFocusResult
 import com.kashif.cameraK.motion.AndroidCameraMotionTracker
 import com.kashif.cameraK.motion.CameraMotionState
 import com.kashif.cameraK.pro.AndroidProCameraControls
@@ -110,6 +113,26 @@ actual class CameraController(
     private val proSettingsMutex = Mutex()
     private var applyingProSettings = false
     actual val proCameraState: StateFlow<ProCameraState> = proControls.state
+    private val tapFocus = AndroidTapFocus()
+
+    actual suspend fun focusAt(point: FocusPoint): TapFocusResult = withContext(Dispatchers.Main.immediate) {
+        val current = camera
+        val preview = previewView
+        if (current == null ||
+            preview == null ||
+            applyingProSettings ||
+            proControls.isApplying ||
+            pendingCaptures.value != 0 ||
+            proCameraState.value.errorMessage != null ||
+            !lifecycleOwner.lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)
+        ) {
+            TapFocusResult.NOT_READY
+        } else {
+            tapFocus.focus(current, preview, point, proCameraState.value.settings)
+        }
+    }
+
+    actual fun cancelTapFocus() = tapFocus.cancel()
 
     actual suspend fun applyProCameraSettings(settings: ProCameraSettings): ProCameraSettings =
         withContext(Dispatchers.Main.immediate) {
@@ -119,6 +142,7 @@ actual class CameraController(
                 }
                 settings.validated(proCameraState.value.capabilities)
                 check(pendingCaptures.value == 0) { "Cannot change pro controls during capture" }
+                cancelTapFocus()
                 applyingProSettings = true
                 try {
                     // ZSL may select a buffered frame taken BEFORE the user's control change.
@@ -212,6 +236,7 @@ actual class CameraController(
 
     @OptIn(ExperimentalCamera2Interop::class)
     fun bindCamera(previewView: PreviewView, onCameraReady: () -> Unit = {}) {
+        cancelTapFocus()
         this.previewView = previewView
 
         memoryManager.initialize(context)
@@ -697,6 +722,7 @@ actual class CameraController(
     }
 
     actual fun setZoom(zoomRatio: Float) {
+        cancelTapFocus()
         require(zoomRatio.isFinite()) { "Zoom must be finite" }
         val zoom = camera?.cameraInfo?.zoomState?.value ?: return
         camera?.cameraControl?.setZoomRatio(zoomRatio.coerceIn(zoom.minZoomRatio, zoom.maxZoomRatio))
@@ -762,6 +788,7 @@ actual class CameraController(
     }
 
     actual fun stopSession() {
+        cancelTapFocus()
         motionTracker.stop()
         cameraProvider?.unbindAll()
         memoryManager.clearBufferPools()
@@ -1125,6 +1152,7 @@ actual class CameraController(
      * Should be called when the controller is being destroyed
      */
     actual fun cleanup() {
+        cancelTapFocus()
         motionTracker.close()
         proControls.close()
         proScope.cancel()
