@@ -42,6 +42,11 @@ data class ProCameraState(
 internal val ProCameraSettings.applicationTimeoutMs: Long
     get() = 5000L + (manualExposure?.exposureTimeNs ?: 0L) / 1_000_000L
 
+/** Allow the old repeating request to drain before the new request reaches the sensor. */
+internal fun camera2ControlTimeoutMs(requestedExposureNs: Long, pendingExposureNs: Long, pipelineDepth: Int): Long =
+    5000L +
+        (maxOf(requestedExposureNs, pendingExposureNs, 33_333_333L) / 1_000_000L) * (pipelineDepth.coerceIn(1, 8) + 1)
+
 internal fun ProCameraSettings.validated(capabilities: ProCameraCapabilities): ProCameraSettings {
     require(exposureCompensationEv.isFinite()) { "EV must be finite" }
     manualExposure?.let { exposure ->

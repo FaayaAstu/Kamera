@@ -15,7 +15,7 @@ enum class MotionTrackingStatus { STOPPED, STARTING, TRACKING, UNAVAILABLE, ERRO
 /**
  * Fused gyro/gravity measurement in the device's fixed portrait axes (x right, y top, z out of screen).
  * Angles are degrees, independent of display rotation and front-camera mirroring.
- * Roll is undefined when the phone is flat; [rollDegrees] is then null.
+ * Roll is suppressed within about 3 degrees of flat, where gravity cannot reliably resolve it; [rollDegrees] is then null.
  */
 @Immutable
 data class CameraAttitude(
@@ -82,7 +82,7 @@ internal class MotionProcessor {
             val horizontal = sqrt(gx * gx + gy * gy)
             val sample = CameraAttitude(
                 timestampNs = timestampNs,
-                rollDegrees = if (horizontal < 1e-3) null else atan2(gx, -gy).degrees(),
+                rollDegrees = if (horizontal < 0.05) null else atan2(gx, -gy).degrees(),
                 pitchDegrees = atan2(gz, horizontal).degrees(),
                 tiltFromHorizontalDegrees = acos(kotlin.math.abs(gz).coerceIn(0.0, 1.0)).degrees(),
                 referenceDeviationDegrees = reference?.let {

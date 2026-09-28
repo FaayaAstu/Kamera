@@ -123,7 +123,8 @@ actual class CameraController(
                 try {
                     // ZSL may select a buffered frame taken BEFORE the user's control change.
                     // Keep the fast non-ZSL pipeline once pro controls have been used.
-                    if (!disableZslForProControls && qualityPriority == QualityPrioritization.SPEED &&
+                    if (!disableZslForProControls &&
+                        qualityPriority == QualityPrioritization.SPEED &&
                         settings != ProCameraSettings()
                     ) {
                         check(activeRecording == null) { "Stop recording before enabling pro controls" }
@@ -696,7 +697,9 @@ actual class CameraController(
     }
 
     actual fun setZoom(zoomRatio: Float) {
-        camera?.cameraControl?.setZoomRatio(zoomRatio.coerceIn(1f, getMaxZoom()))
+        require(zoomRatio.isFinite()) { "Zoom must be finite" }
+        val zoom = camera?.cameraInfo?.zoomState?.value ?: return
+        camera?.cameraControl?.setZoomRatio(zoomRatio.coerceIn(zoom.minZoomRatio, zoom.maxZoomRatio))
     }
 
     actual fun getZoom(): Float = camera?.cameraInfo?.zoomState?.value?.zoomRatio ?: 1f

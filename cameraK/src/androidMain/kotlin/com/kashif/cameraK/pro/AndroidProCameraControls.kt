@@ -31,10 +31,12 @@ internal class AndroidProCameraControls(private val executor: Executor) {
     var isApplying = false
         private set
     private var closed = false
+    private var pendingExposureNs = 0L
 
     suspend fun bind(camera: Camera, id: String, characteristics: CameraCharacteristics) = mutex.withLock {
         check(!closed) { "Pro controls are disposed" }
         val previous = mutableState.value
+        if (previous.capabilities.cameraId != id) pendingExposureNs = 0L
         this.camera = camera
         this.characteristics = characteristics
         val capabilities = capabilities(id, characteristics)
@@ -83,14 +85,20 @@ internal class AndroidProCameraControls(private val executor: Executor) {
                     ).roundToInt(),
             )
         }
+        val requestedExposureNs = settings.manualExposure?.exposureTimeNs ?: 0L
+        val pipelineDepth = characteristics?.get(CameraCharacteristics.REQUEST_PIPELINE_MAX_DEPTH)?.toInt() ?: 8
+        val timeoutMs = camera2ControlTimeoutMs(requestedExposureNs, pendingExposureNs, pipelineDepth)
+        // A timed-out request may still be in flight. Keep its duration until an update is acknowledged.
+        pendingExposureNs = maxOf(pendingExposureNs, requestedExposureNs)
         try {
             isApplying = true
             // Replacing the library's interop options also restores CameraX's auto modes when keys are absent.
-            withTimeout(settings.applicationTimeoutMs) {
+            withTimeout(timeoutMs) {
                 Camera2CameraControl.from(
                     current.cameraControl,
                 ).setCaptureRequestOptions(options.build()).awaitControl(executor)
             }
+            pendingExposureNs = requestedExposureNs
             check(!closed) { "Pro controls are disposed" }
             mutableState.value = mutableState.value.copy(settings = settings, errorMessage = null)
             settings

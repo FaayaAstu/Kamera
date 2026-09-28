@@ -41,8 +41,11 @@ EV is in stops and works only in auto exposure. Android quantizes EV to the
 hardware step and returns the quantized settings. Manual exposure requires flash
 OFF. Torch is a separate control and still requires device validation.
 
-`applyProCameraSettings` suspends until the native control completion arrives
-(timeout is five seconds plus the requested shutter duration), validates values and
+`applyProCameraSettings` suspends until the native control completion arrives.
+Android budgets five seconds plus the larger of the requested and pending shutter
+durations multiplied by the camera pipeline depth plus one (depth clamped to 1–8).
+This also allows a reset to auto to drain a previous long exposure. iOS budgets
+five seconds plus the requested shutter duration. The API validates values and
 throws for unavailable controls, invalid values or native failures. On a native failure `errorMessage` is set;
 reapply valid settings before capturing. Control changes are serialized. Avoid
 changing lenses, flash or settings during capture/control updates; lens switches
@@ -80,7 +83,8 @@ Use a separate coroutine to collect the flow. The StateHolder also exposes
   including the iOS simulator and desktop, report UNAVAILABLE.
 - Angles use the device's fixed portrait axes: x right, y top, z out of the screen.
   They do not rotate with the UI or change sign with front-camera mirroring.
-- Roll is zero upright and null when flat, where gravity cannot determine roll.
+- Roll is zero upright and null within about 3 degrees of flat, where gravity
+  cannot reliably determine roll. This avoids noisy roll readings near horizontal.
   Pitch is -90 degrees screen-up/flat, zero upright, +90 screen-down/flat.
   Tilt from horizontal is zero flat and 90 upright.
 - Calibration compares gravity directions. It measures pitch/roll deviation,
@@ -154,3 +158,13 @@ References: [Camera2CameraControl](https://developer.android.com/reference/andro
 [AVFoundation custom exposure](https://developer.apple.com/documentation/avfoundation/avcapturedevice/setexposuremodecustom(duration:iso:completionhandler:)),
 [Android motion sensors](https://developer.android.com/develop/sensors-and-location/sensors/sensors_motion),
 [Core Motion](https://developer.apple.com/documentation/coremotion/cmmotionmanager).
+
+### Android device feedback follow-up
+
+- Control timeout budgets account for the Camera2 request pipeline and previous
+  long exposures, including an auto reset after a request timeout.
+- Android zoom respects the bound camera's reported minimum and maximum ratios,
+  including ratios below 1 when the logical camera exposes them. Auxiliary lenses
+  still depend on vendor access; this does not unlock system-only cameras.
+- Near-flat motion tests cover roll suppression where the gravity projection is
+  too small for a stable result. Four tests cover the Android timeout budget.

@@ -27,6 +27,14 @@ class MotionProcessorTest {
     }
 
     @Test
+    fun nearFlatGravityDoesNotInventAnUnstableRoll() {
+        val tracker = tracker()
+        tracker.update(1, 0.005, -0.005, -1.0, null)
+        assertNull(tracker.state.value.attitude!!.rollDegrees)
+        assertTrue(tracker.state.value.attitude!!.tiltFromHorizontalDegrees < 1.0)
+    }
+
+    @Test
     fun calibrationMeasuresGravityDeviationAndCanBeCleared() {
         val tracker = tracker()
         tracker.update(1, 0.0, -1.0, 0.0, null)
