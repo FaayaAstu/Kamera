@@ -20,6 +20,14 @@ A modern camera library for Compose Multiplatform supporting Android, iOS, and D
 
 ## Features
 
+### Faaya fork additions
+
+- Selected-lens manual ISO/shutter, normalized manual focus and EV compensation.
+- Opt-in gyro/gravity angle stream with calibration and capture-request snapshots.
+- Android/iOS native controls and explicit unsupported capability reporting.
+
+See [Pro camera API and device verification](docs/pro-camera.md) for usage and limitations.
+
 - **Cross-Platform**: Android, iOS, and JVM Desktop
 - **Compose-First**: Native Compose Multiplatform API
 - **Flexible Configuration**: Aspect ratios, zoom, focus, flash, lens selection (ultra-wide/tele) with hardware capability query

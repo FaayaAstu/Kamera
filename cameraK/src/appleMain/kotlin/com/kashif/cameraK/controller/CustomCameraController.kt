@@ -51,6 +51,9 @@ class CustomCameraController(
     var onPhotoCapture: ((NSData?) -> Unit)? = null
     var onError: ((CameraException) -> Unit)? = null
     var onSessionReady: (() -> Unit)? = null
+    internal var onCameraChanged: ((AVCaptureDevice) -> Unit)? = null
+    internal fun getCurrentCamera(): AVCaptureDevice? = currentCamera
+    internal var useManualExposure = false
 
     var flashMode: AVCaptureFlashMode = AVCaptureFlashModeAuto
     var torchMode: AVCaptureTorchMode = AVCaptureTorchModeAuto
@@ -510,6 +513,9 @@ class CustomCameraController(
             QualityPrioritization.NONE -> null
         }
 
+        // Apple's photo pipeline honors custom ISO/shutter only with speed prioritization.
+        if (useManualExposure) settings.photoQualityPrioritization = AVCapturePhotoQualityPrioritizationSpeed
+
         // Only set flash mode if supported by device (iPads don't have flash)
         val supportedFlashModes = photoOutput?.supportedFlashModes() as? List<*>
         if (supportedFlashModes?.contains(this.flashMode) == true) {
@@ -596,6 +602,7 @@ class CustomCameraController(
             }
 
             session.commitConfiguration()
+            currentCamera?.let { onCameraChanged?.invoke(it) }
         } catch (_: Exception) {
             session.commitConfiguration()
         }
@@ -650,6 +657,7 @@ class CustomCameraController(
 
             captureSession?.commitConfiguration()
 
+            currentCamera?.let { onCameraChanged?.invoke(it) }
             processPendingConfigurations()
 
             if (wasRunning) {

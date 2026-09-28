@@ -10,6 +10,11 @@ import com.kashif.cameraK.enums.FlashMode
 import com.kashif.cameraK.enums.ImageFormat
 import com.kashif.cameraK.enums.QualityPrioritization
 import com.kashif.cameraK.enums.TorchMode
+import com.kashif.cameraK.motion.AppleCameraMotionTracker
+import com.kashif.cameraK.motion.CameraMotionState
+import com.kashif.cameraK.pro.AppleProCameraControls
+import com.kashif.cameraK.pro.ProCameraSettings
+import com.kashif.cameraK.pro.ProCameraState
 import com.kashif.cameraK.result.ImageCaptureResult
 import com.kashif.cameraK.utils.CameraKLogger
 import com.kashif.cameraK.utils.MemoryManager
@@ -22,7 +27,10 @@ import kotlinx.atomicfu.atomic
 import kotlinx.cinterop.BetaInteropApi
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.autoreleasepool
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import platform.AVFoundation.AVCaptureDeviceInput
 import platform.AVFoundation.AVCaptureFlashMode
 import platform.AVFoundation.AVCaptureFlashModeAuto
@@ -76,6 +84,26 @@ actual class CameraController(
     internal var targetResolution: Pair<Int, Int>? = null,
     internal var mirrorFrontCamera: Boolean = false,
 ) : UIViewController(null, null) {
+    private val motionTracker = AppleCameraMotionTracker()
+    actual val motionState: StateFlow<CameraMotionState> = motionTracker.state
+    private val proControls = AppleProCameraControls()
+    actual val proCameraState: StateFlow<ProCameraState> = proControls.state
+
+    actual suspend fun applyProCameraSettings(settings: ProCameraSettings): ProCameraSettings =
+        withContext(Dispatchers.Main.immediate) {
+            require(settings.manualExposure == null || flashMode == FlashMode.OFF) {
+                "Manual exposure requires flash OFF"
+            }
+            check(!isCapturing.value) { "Cannot change pro controls during capture" }
+            proControls.apply(settings).also {
+                customCameraController.useManualExposure = it.manualExposure != null
+            }
+        }
+
+    actual fun startMotionTracking(intervalMs: Int) = motionTracker.start(intervalMs)
+    actual fun stopMotionTracking() = motionTracker.stop()
+    actual fun calibrateMotion(): Boolean = motionTracker.calibrate()
+    actual fun clearMotionCalibration() = motionTracker.clearCalibration()
     private var isCapturing = atomic(false)
     private val customCameraController = CustomCameraController(
         qualityPrioritization = qualityPriority,
@@ -163,7 +191,12 @@ actual class CameraController(
     }
 
     private fun setupCamera() {
+        customCameraController.onCameraChanged = { device ->
+            proControls.bind(device)
+            customCameraController.useManualExposure = proCameraState.value.settings.manualExposure != null
+        }
         customCameraController.onSessionReady = {
+            customCameraController.getCurrentCamera()?.let { device -> proControls.bind(device) }
             try {
                 customCameraController.setupPreviewLayer(view)
             } catch (e: Exception) {
@@ -280,7 +313,18 @@ actual class CameraController(
      * Fast file-based capture for iOS - saves directly without ByteArray processing.
      */
     @OptIn(ExperimentalForeignApi::class, BetaInteropApi::class)
-    actual suspend fun takePictureToFile(): ImageCaptureResult = suspendCancellableCoroutine { continuation ->
+    actual suspend fun takePictureToFile(): ImageCaptureResult = try {
+        withContext(Dispatchers.Main.immediate) {
+            proControls.withReady { captureFile() }
+        }
+    } catch (error: Exception) {
+        if (error is kotlinx.coroutines.CancellationException) throw error
+        ImageCaptureResult.Error(error)
+    }
+
+    @OptIn(ExperimentalForeignApi::class, BetaInteropApi::class)
+    private suspend fun captureFile(): ImageCaptureResult = suspendCancellableCoroutine { continuation ->
+        val motion = motionTracker.snapshot()
         if (pendingCaptures.incrementAndGet() > maxConcurrentCaptures) {
             pendingCaptures.decrementAndGet()
             CameraKLogger.e("CameraK", "CameraK: Burst queue full, dropping frame")
@@ -326,7 +370,7 @@ actual class CameraController(
                                                 )
 
                                                 if (photosPath != null) {
-                                                    ImageCaptureResult.SuccessWithFile(photosPath)
+                                                    ImageCaptureResult.SuccessWithFile(photosPath, motion)
                                                 } else {
                                                     ImageCaptureResult.Error(
                                                         Exception("Failed to save to Photos library"),
@@ -334,7 +378,7 @@ actual class CameraController(
                                                 }
                                             }
                                             Directory.DOCUMENTS -> {
-                                                ImageCaptureResult.SuccessWithFile(filePath)
+                                                ImageCaptureResult.SuccessWithFile(filePath, motion)
                                             }
                                         }
                                     } else {
@@ -385,15 +429,22 @@ actual class CameraController(
     }
 
     actual fun toggleFlashMode() {
-        flashMode = when (flashMode) {
-            FlashMode.OFF -> FlashMode.ON
-            FlashMode.ON -> FlashMode.AUTO
-            FlashMode.AUTO -> FlashMode.OFF
-        }
-        customCameraController.setFlashMode(flashMode.toAVCaptureFlashMode())
+        setFlashMode(
+            when (flashMode) {
+                FlashMode.OFF -> FlashMode.ON
+                FlashMode.ON -> FlashMode.AUTO
+                FlashMode.AUTO -> FlashMode.OFF
+            },
+        )
     }
 
     actual fun setFlashMode(mode: FlashMode) {
+        check(!proControls.isApplying && !isCapturing.value) {
+            "Wait for capture/control updates before changing flash"
+        }
+        require(mode == FlashMode.OFF || proCameraState.value.settings.manualExposure == null) {
+            "Manual exposure requires flash OFF"
+        }
         flashMode = mode
         customCameraController.setFlashMode(mode.toAVCaptureFlashMode())
     }
@@ -434,6 +485,9 @@ actual class CameraController(
     actual fun getMaxZoom(): Float = customCameraController.getMaxZoom()
 
     actual fun toggleCameraLens() {
+        check(!proControls.isApplying && !isCapturing.value && movieFileOutput?.isRecording() != true) {
+            "Cannot switch lenses during capture, recording or control updates"
+        }
         memoryManager.updateMemoryStatus()
 
         if (memoryManager.isUnderMemoryPressure()) {
@@ -455,6 +509,9 @@ actual class CameraController(
     actual fun getPreferredCameraDeviceType(): CameraDeviceType = cameraDeviceType
 
     actual fun setPreferredCameraDeviceType(deviceType: CameraDeviceType) {
+        check(!proControls.isApplying && !isCapturing.value && movieFileOutput?.isRecording() != true) {
+            "Cannot switch lenses during capture, recording or control updates"
+        }
         if (cameraDeviceType == deviceType) return // avoid a redundant AVCaptureSession input swap
         cameraDeviceType = deviceType
         customCameraController.switchToDeviceType(deviceType)
@@ -476,6 +533,7 @@ actual class CameraController(
     }
 
     actual fun stopSession() {
+        motionTracker.stop()
         customCameraController.stopSession()
     }
 
@@ -488,6 +546,10 @@ actual class CameraController(
     }
 
     actual fun cleanup() {
+        motionTracker.close()
+        proControls.close()
+        customCameraController.onCameraChanged = null
+        customCameraController.onSessionReady = null
         removeOrientationObserver()
         orientationChangedCallback = null
         movieFileOutput = null

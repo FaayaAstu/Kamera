@@ -2,6 +2,7 @@ package com.kashif.cameraK.controller
 
 import android.content.Context
 import android.content.pm.PackageManager
+import android.hardware.camera2.CameraManager
 import android.os.Environment
 import android.util.Rational
 import android.util.Size
@@ -48,6 +49,12 @@ import com.kashif.cameraK.enums.FlashMode
 import com.kashif.cameraK.enums.ImageFormat
 import com.kashif.cameraK.enums.QualityPrioritization
 import com.kashif.cameraK.enums.TorchMode
+import com.kashif.cameraK.motion.AndroidCameraMotionTracker
+import com.kashif.cameraK.motion.CameraMotionState
+import com.kashif.cameraK.pro.AndroidProCameraControls
+import com.kashif.cameraK.pro.ProCameraSettings
+import com.kashif.cameraK.pro.ProCameraState
+import com.kashif.cameraK.pro.validated
 import com.kashif.cameraK.result.ImageCaptureResult
 import com.kashif.cameraK.utils.CameraKLogger
 import com.kashif.cameraK.utils.InvalidConfigurationException
@@ -58,8 +65,17 @@ import com.kashif.cameraK.video.VideoConfiguration
 import com.kashif.cameraK.video.VideoQuality
 import kotlinx.atomicfu.atomic
 import kotlinx.coroutines.CancellableContinuation
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.text.SimpleDateFormat
@@ -85,6 +101,51 @@ actual class CameraController(
     internal var targetResolution: Pair<Int, Int>? = null,
     internal var mirrorFrontCamera: Boolean = false,
 ) {
+
+    private val motionTracker = AndroidCameraMotionTracker(context, lifecycleOwner)
+    actual val motionState: StateFlow<CameraMotionState> = motionTracker.state
+    private val proControls = AndroidProCameraControls(ContextCompat.getMainExecutor(context))
+    private val proScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var disableZslForProControls = false
+    private val proSettingsMutex = Mutex()
+    private var applyingProSettings = false
+    actual val proCameraState: StateFlow<ProCameraState> = proControls.state
+
+    actual suspend fun applyProCameraSettings(settings: ProCameraSettings): ProCameraSettings =
+        withContext(Dispatchers.Main.immediate) {
+            proSettingsMutex.withLock {
+                require(settings.manualExposure == null || flashMode == FlashMode.OFF) {
+                    "Manual exposure requires flash OFF"
+                }
+                settings.validated(proCameraState.value.capabilities)
+                check(pendingCaptures.value == 0) { "Cannot change pro controls during capture" }
+                applyingProSettings = true
+                try {
+                    // ZSL may select a buffered frame taken BEFORE the user's control change.
+                    // Keep the fast non-ZSL pipeline once pro controls have been used.
+                    if (!disableZslForProControls && qualityPriority == QualityPrioritization.SPEED &&
+                        settings != ProCameraSettings()
+                    ) {
+                        check(activeRecording == null) { "Stop recording before enabling pro controls" }
+                        val view = previewView ?: error("Camera not ready")
+                        disableZslForProControls = true
+                        kotlinx.coroutines.withTimeout(5000) {
+                            suspendCancellableCoroutine<Unit> { continuation ->
+                                bindCamera(view) { if (continuation.isActive) continuation.resume(Unit) }
+                            }
+                        }
+                    }
+                    proControls.apply(settings)
+                } finally {
+                    applyingProSettings = false
+                }
+            }
+        }
+
+    actual fun startMotionTracking(intervalMs: Int) = motionTracker.start(intervalMs)
+    actual fun stopMotionTracking() = motionTracker.stop()
+    actual fun calibrateMotion(): Boolean = motionTracker.calibrate()
+    actual fun clearMotionCalibration() = motionTracker.clearCalibration()
 
     private var cameraProvider: ProcessCameraProvider? = null
     private var imageCapture: ImageCapture? = null
@@ -215,7 +276,17 @@ actual class CameraController(
                     useCaseGroup,
                 )
 
-                onCameraReady()
+                val boundCamera = camera ?: error("Camera binding failed")
+                val cameraId = pinnedPhysicalId ?: Camera2CameraInfo.from(boundCamera.cameraInfo).cameraId
+                val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+                proScope.launch {
+                    try {
+                        proControls.bind(boundCamera, cameraId, manager.getCameraCharacteristics(cameraId))
+                        onCameraReady()
+                    } catch (error: Exception) {
+                        CameraKLogger.e("CameraK", "Pro controls initialization failed", error)
+                    }
+                }
             } catch (exc: Exception) {
                 CameraKLogger.e("CameraK", "==> Use case binding failed for $cameraDeviceType: ${exc.message}")
                 CameraKLogger.e("CameraK", "Unhandled exception", exc)
@@ -375,7 +446,13 @@ actual class CameraController(
             .setCaptureMode(
                 when (qualityPriority) {
                     QualityPrioritization.QUALITY -> ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY
-                    QualityPrioritization.SPEED -> ImageCapture.CAPTURE_MODE_ZERO_SHUTTER_LAG
+                    QualityPrioritization.SPEED -> {
+                        if (disableZslForProControls) {
+                            ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
+                        } else {
+                            ImageCapture.CAPTURE_MODE_ZERO_SHUTTER_LAG
+                        }
+                    }
                     QualityPrioritization.BALANCED -> ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
                     QualityPrioritization.NONE -> {
                         if (memoryManager.isUnderMemoryPressure()) {
@@ -480,7 +557,19 @@ actual class CameraController(
         }
     }
 
-    actual suspend fun takePictureToFile(): ImageCaptureResult = suspendCancellableCoroutine { cont ->
+    actual suspend fun takePictureToFile(): ImageCaptureResult = try {
+        withContext(Dispatchers.Main.immediate) {
+            proSettingsMutex.withLock {
+                proControls.awaitReady()
+                captureFile()
+            }
+        }
+    } catch (error: Exception) {
+        if (error is kotlinx.coroutines.CancellationException) throw error
+        ImageCaptureResult.Error(error)
+    }
+
+    private suspend fun captureFile(): ImageCaptureResult = suspendCancellableCoroutine { cont ->
         if (pendingCaptures.incrementAndGet() > maxConcurrentCaptures) {
             pendingCaptures.decrementAndGet()
             CameraKLogger.w("CameraK", "Burst queue full, dropping frame")
@@ -508,6 +597,7 @@ actual class CameraController(
      * Directly saves to final destination and returns file path.
      */
     private fun performCaptureToFile(continuation: CancellableContinuation<ImageCaptureResult>) {
+        val motion = motionTracker.snapshot()
         // Create final output file directly in desired directory
         val outputFile = createFinalOutputFile()
         val outputOptions =
@@ -532,7 +622,7 @@ actual class CameraController(
                         }
                     }
 
-                    continuation.resume(ImageCaptureResult.SuccessWithFile(outputFile.absolutePath))
+                    continuation.resume(ImageCaptureResult.SuccessWithFile(outputFile.absolutePath, motion))
                 }
 
                 override fun onError(exc: ImageCaptureException) {
@@ -549,15 +639,22 @@ actual class CameraController(
     }
 
     actual fun toggleFlashMode() {
-        flashMode = when (flashMode) {
-            FlashMode.OFF -> FlashMode.ON
-            FlashMode.ON -> FlashMode.AUTO
-            FlashMode.AUTO -> FlashMode.OFF
-        }
-        imageCapture?.flashMode = flashMode.toCameraXFlashMode()
+        setFlashMode(
+            when (flashMode) {
+                FlashMode.OFF -> FlashMode.ON
+                FlashMode.ON -> FlashMode.AUTO
+                FlashMode.AUTO -> FlashMode.OFF
+            },
+        )
     }
 
     actual fun setFlashMode(mode: FlashMode) {
+        check(!proControls.isApplying && !applyingProSettings && pendingCaptures.value == 0) {
+            "Wait for capture/control updates before changing flash"
+        }
+        require(mode == FlashMode.OFF || proCameraState.value.settings.manualExposure == null) {
+            "Manual exposure requires flash OFF"
+        }
         flashMode = mode
         imageCapture?.flashMode = mode.toCameraXFlashMode()
     }
@@ -608,6 +705,9 @@ actual class CameraController(
     actual fun getTorchMode(): TorchMode? = torchMode
 
     actual fun toggleCameraLens() {
+        check(!proControls.isApplying && !applyingProSettings && pendingCaptures.value == 0) {
+            "Cannot switch lenses during capture or control updates"
+        }
         // A lens switch rebinds (unbindAll), which would tear down a live recording session.
         if (activeRecording != null) {
             CameraKLogger.w("CameraController", "Ignoring lens switch while recording")
@@ -635,6 +735,9 @@ actual class CameraController(
     actual fun getPreferredCameraDeviceType(): CameraDeviceType = cameraDeviceType
 
     actual fun setPreferredCameraDeviceType(deviceType: CameraDeviceType) {
+        check(!proControls.isApplying && !applyingProSettings && pendingCaptures.value == 0) {
+            "Cannot switch lenses during capture or control updates"
+        }
         if (cameraDeviceType == deviceType) return
         // Same as the lens switch: this rebinds and would kill a live recording.
         if (activeRecording != null) {
@@ -655,6 +758,7 @@ actual class CameraController(
     }
 
     actual fun stopSession() {
+        motionTracker.stop()
         cameraProvider?.unbindAll()
         memoryManager.clearBufferPools()
     }
@@ -1017,6 +1121,9 @@ actual class CameraController(
      * Should be called when the controller is being destroyed
      */
     actual fun cleanup() {
+        motionTracker.close()
+        proControls.close()
+        proScope.cancel()
         orientationEventListener?.disable()
         orientationEventListener = null
         orientationChangedCallback = null

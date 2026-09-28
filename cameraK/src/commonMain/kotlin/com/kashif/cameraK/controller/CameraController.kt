@@ -9,14 +9,33 @@ import com.kashif.cameraK.enums.FlashMode
 import com.kashif.cameraK.enums.ImageFormat
 import com.kashif.cameraK.enums.QualityPrioritization
 import com.kashif.cameraK.enums.TorchMode
+import com.kashif.cameraK.motion.CameraMotionState
+import com.kashif.cameraK.pro.ProCameraSettings
+import com.kashif.cameraK.pro.ProCameraState
 import com.kashif.cameraK.result.ImageCaptureResult
 import com.kashif.cameraK.video.VideoCaptureResult
 import com.kashif.cameraK.video.VideoConfiguration
+import kotlinx.coroutines.flow.StateFlow
 
 /**
  * Interface defining the core functionalities of the CameraController.
  */
 expect class CameraController {
+
+    /** Selected-lens ranges and last successfully applied pro settings. */
+    val proCameraState: StateFlow<ProCameraState>
+
+    /** Validate and apply controls. Call after Ready; throws on unsupported/out-of-range settings. */
+    suspend fun applyProCameraSettings(settings: ProCameraSettings): ProCameraSettings
+
+    /** Opt-in fused gyro/gravity tracking. Start/stop on the main thread; automatically pauses in background. */
+    val motionState: StateFlow<CameraMotionState>
+    fun startMotionTracking(intervalMs: Int = 50)
+    fun stopMotionTracking()
+
+    /** Set current gravity direction as reference. False if no fresh reading is available. */
+    fun calibrateMotion(): Boolean
+    fun clearMotionCalibration()
 
     /**
      * Captures an image and saves it directly to a file.
